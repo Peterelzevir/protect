@@ -178,11 +178,26 @@ async function isGroupOwner(userId, groupId) {
   }
 }
 
-async function isBotAdmin(ctx) {
+async function isBotAdmin(ctx, requirePermissions = []) {
   if (!ctx.chat || ctx.chat.type === 'private') return false;
   try {
     const botMember = await ctx.telegram.getChatMember(ctx.chat.id, ctx.botInfo.id);
-    return ['creator', 'administrator'].includes(botMember.status);
+    
+    // Cek apakah bot adalah admin
+    if (!['creator', 'administrator'].includes(botMember.status)) {
+      return false;
+    }
+    
+    // Jika izin tertentu diperlukan, periksa
+    if (requirePermissions.length > 0) {
+      for (const perm of requirePermissions) {
+        if (!botMember[perm]) {
+          return false;
+        }
+      }
+    }
+    
+    return true;
   } catch (error) {
     console.error('❌ Error memeriksa status bot:', error);
     return false;
@@ -1099,7 +1114,7 @@ Tekan tombol di bawah untuk mulai:`;
       reply_markup: {
         inline_keyboard: [
           [
-            { text: '➕ Tambah ke Grup', url: `https://t.me/${ctx.botInfo.username}?startgroup=true` },
+            { text: '➕ Tambah ke Grup', url: `https://t.me/${ctx.botInfo.username}?startgroup=settings` },
             { text: '📚 Bantuan', callback_data: 'help' }
           ],
           [
@@ -1266,8 +1281,77 @@ bot.action(/manage_group:(.+)/, async (ctx) => {
   try {
     const groupId = ctx.match[1];
     
-    // Simpan ID grup dalam sesi
-    ctx.session.currentGroupId = groupId;
+    // Pastikan objek session tersedia
+    if (!ctx.session) {
+      ctx.session = {};
+    }
+    
+    // Periksa apakah bot masih berada dalam grup
+    try {
+      // Coba dapatkan informasi keanggotaan bot di grup
+      const botMember = await ctx.telegram.getChatMember(groupId, ctx.botInfo.id);
+      
+      // Jika bot sudah tidak menjadi anggota grup
+      if (!botMember || ['left', 'kicked'].includes(botMember.status)) {
+        // Hapus grup dari database
+        await Group.deleteOne({ groupId });
+        
+        await ctx.answerCbQuery('Bot tidak lagi menjadi anggota grup ini.');
+        return ctx.editMessageText('❌ Bot tidak lagi menjadi anggota grup ini. Grup telah dihapus dari daftar.', {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '« Kembali ke Daftar Grup', callback_data: 'my_groups' }]
+            ]
+          }
+        });
+      }
+      
+      // Periksa apakah bot memiliki hak admin
+      if (botMember.status !== 'administrator') {
+        return ctx.editMessageText(`⚠️ *Peringatan: Bot Bukan Admin*\n\nBot saat ini bukan admin di grup ini. \n\nUntuk menggunakan semua fitur, bot harus memiliki status admin dengan izin berikut:\n• Hapus pesan\n• Blokir pengguna\n• Tambah anggota baru\n\nSilakan jadikan bot sebagai admin dengan izin penuh untuk menggunakan semua fitur.`, {
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '« Kembali ke Daftar Grup', callback_data: 'my_groups' }]
+            ]
+          }
+        });
+      }
+      
+      // Periksa apakah bot memiliki semua izin yang diperlukan
+      const missingPermissions = [];
+      
+      if (!botMember.can_delete_messages) missingPermissions.push('Hapus pesan');
+      if (!botMember.can_restrict_members) missingPermissions.push('Blokir pengguna');
+      if (!botMember.can_invite_users) missingPermissions.push('Tambah anggota baru');
+      
+      if (missingPermissions.length > 0) {
+        const permList = missingPermissions.map(p => `• ${p}`).join('\n');
+        
+        return ctx.editMessageText(`⚠️ *Peringatan: Izin Bot Tidak Lengkap*\n\nBot adalah admin di grup, tetapi tidak memiliki semua izin yang diperlukan.\n\nIzin yang kurang:\n${permList}\n\nSilakan perbarui izin bot untuk menggunakan semua fitur.`, {
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '« Kembali ke Daftar Grup', callback_data: 'my_groups' }]
+            ]
+          }
+        });
+      }
+    } catch (error) {
+      console.error('❌ Error memeriksa keanggotaan bot:', error);
+      
+      // Jika tidak dapat memeriksa keanggotaan, asumsikan bot tidak lagi di grup
+      await Group.deleteOne({ groupId });
+      
+      await ctx.answerCbQuery('Tidak dapat mengakses grup. Bot mungkin tidak lagi menjadi anggota.');
+      return ctx.editMessageText('❌ Tidak dapat mengakses grup. Bot mungkin telah dikeluarkan dari grup. Grup telah dihapus dari daftar.', {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '« Kembali ke Daftar Grup', callback_data: 'my_groups' }]
+          ]
+        }
+      });
+    }
     
     // Cari informasi grup
     const group = await Group.findOne({ groupId });
@@ -1294,6 +1378,9 @@ bot.action(/manage_group:(.+)/, async (ctx) => {
         }
       });
     }
+    
+    // Jika semua pemeriksaan berhasil, sekarang tetapkan sesi
+    ctx.session.currentGroupId = groupId;
     
     await ctx.answerCbQuery();
     return ctx.editMessageText(`⚙️ *Mengelola Grup: ${group.groupName}*\n\nPilih kategori pengaturan:`, {
@@ -1327,14 +1414,46 @@ bot.action(/manage_group:(.+)/, async (ctx) => {
   } catch (error) {
     console.error('❌ Error mengelola grup:', error);
     await ctx.answerCbQuery('Terjadi kesalahan. Coba lagi nanti.');
-    return ctx.editMessageText('❌ Terjadi kesalahan saat mengakses pengaturan grup. Silakan coba lagi nanti.');
+    return ctx.editMessageText('❌ Terjadi kesalahan saat mengakses pengaturan grup. Silakan coba lagi nanti.', {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '« Kembali ke Daftar Grup', callback_data: 'my_groups' }]
+        ]
+      }
+    });
   }
 });
 
-// Handler pengaturan notifikasi
+
+
+// Contoh update untuk action handler yang menggunakan session
+// Perbarui setiap action handler yang menggunakan ctx.session
 bot.action(/notifications:(.+)/, async (ctx) => {
   try {
     const groupId = ctx.match[1];
+    
+    // Pastikan session ada (pengaman tambahan)
+    if (!ctx.session) {
+      ctx.session = {};
+    }
+    
+    // Periksa apakah bot masih di grup
+    try {
+      await ctx.telegram.getChatMember(groupId, ctx.botInfo.id);
+    } catch (error) {
+      // Bot tidak lagi di grup
+      await Group.deleteOne({ groupId });
+      
+      await ctx.answerCbQuery('Bot tidak lagi menjadi anggota grup ini.');
+      return ctx.editMessageText('❌ Bot tidak lagi menjadi anggota grup ini. Grup telah dihapus dari daftar.', {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '« Kembali ke Daftar Grup', callback_data: 'my_groups' }]
+          ]
+        }
+      });
+    }
+    
     const group = await Group.findOne({ groupId });
     
     if (!group) {
@@ -1369,6 +1488,13 @@ bot.action(/notifications:(.+)/, async (ctx) => {
   } catch (error) {
     console.error('❌ Error pengaturan notifikasi:', error);
     await ctx.answerCbQuery('Terjadi kesalahan. Coba lagi nanti.');
+    return ctx.editMessageText('❌ Terjadi kesalahan. Silakan coba lagi nanti.', {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '« Kembali ke Daftar Grup', callback_data: 'my_groups' }]
+        ]
+      }
+    });
   }
 });
 
@@ -3033,14 +3159,28 @@ Gunakan /help untuk melihat perintah yang tersedia.`, {
   }
 });
 
-// Handler untuk pengguna yang keluar grup
+// Handler para pengguna yang keluar grup
 bot.on('left_chat_member', async (ctx) => {
   try {
     // Cek apakah bot sendiri yang dikeluarkan
     const botWasRemoved = ctx.message.left_chat_member.id === ctx.botInfo.id;
     
     if (botWasRemoved) {
-      // Bot dikeluarkan, hapus data grup jika ada
+      // Dapatkan info grup sebelum dihapus
+      const group = await Group.findOne({ groupId: ctx.chat.id.toString() });
+      
+      if (group && group.ownerId) {
+        // Kirim notifikasi ke pengguna yang menambahkan bot
+        try {
+          await bot.telegram.sendMessage(group.ownerId, 
+            `⚠️ *Pemberitahuan Penting*\n\nBot telah dikeluarkan dari grup *${ctx.chat.title}*. Grup ini telah dihapus dari daftar "Grup Saya".`, 
+            { parse_mode: 'Markdown' });
+        } catch (notifyError) {
+          console.log(`Tidak dapat mengirim notifikasi ke pemilik grup: ${notifyError.message}`);
+        }
+      }
+      
+      // Hapus data grup dari database
       await Group.deleteOne({ groupId: ctx.chat.id.toString() });
       console.log(`✅ Bot dikeluarkan dari grup ${ctx.chat.title}, data grup dihapus.`);
       return;
