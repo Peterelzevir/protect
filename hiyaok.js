@@ -156,6 +156,17 @@ const MessageStats = mongoose.model('MessageStats', messageStatsSchema);
 // Middleware session
 bot.use(session());
 
+// Middleware untuk memastikan session selalu tersedia
+// Tempatkan segera setelah bot.use(session()); di awal kode
+bot.use((ctx, next) => {
+  // Pastikan objek session selalu ada
+  if (!ctx.session) {
+    ctx.session = {};
+    console.log('⚠️ Membuat objek session karena tidak tersedia');
+  }
+  return next();
+});
+
 // Fungsi Helper
 async function isGroupAdmin(ctx, userId) {
   if (!ctx.chat || ctx.chat.type === 'private') return false;
@@ -2015,9 +2026,16 @@ Bot ini ditujukan untuk membantu admin grup mengelola grup dengan lebih efektif 
 });
 
 // Tambahkan ID pengguna ke daftar hitam
-bot.on('text', async (ctx) => {
+bot.on('text', async (ctx, next) => {
+  // Pastikan objek session tersedia
+  if (!ctx.session) {
+    ctx.session = {};
+  }
+  
   // Skip jika tidak dalam mode menunggu blacklist
-  if (!ctx.session.waitingForBlacklist) return;
+  if (!ctx.session.waitingForBlacklist) {
+    return next(); // Penting! Lanjutkan ke handler lain jika bukan mode blacklist
+  }
   
   try {
     const groupId = ctx.session.waitingForBlacklist;
